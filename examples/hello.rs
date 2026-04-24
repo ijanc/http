@@ -15,9 +15,8 @@
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
 
-//! Minimal HTTP/1.0 and HTTP/1.1 library.
-//!
-//! Conforms to RFC 1945 (HTTP/1.0) and RFC 2616 (HTTP/1.1).
+//! Minimal example that links against the http library.
 
-/// Library version, injected at build time from `HTTP_VERSION`.
-pub const VERSION: &str = env!("HTTP_VERSION");
+fn main() {
+    println!("http v{}", http::VERSION);
+}

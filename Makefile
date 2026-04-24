@@ -23,13 +23,16 @@ SRC = http.rs
 LIB = $(BUILD)/libhttp.rlib
 TEST = $(BUILD)/http-test
 
+EXAMPLE_SRCS = $(wildcard examples/*.rs)
+EXAMPLES = $(EXAMPLE_SRCS:examples/%.rs=$(BUILD)/ex-%)
+
 CLIPPY ?= $(shell rustup which clippy-driver 2>/dev/null)
 RUSTFMT ?= $(shell rustup which rustfmt 2>/dev/null)
 RUSTDOC ?= $(shell rustup which rustdoc 2>/dev/null || which rustdoc)
 
 DOC = $(BUILD)/doc/http/index.html
 
-.PHONY: all clean test fmt-check clippy ci doc
+.PHONY: all clean test fmt-check clippy ci doc examples
 
 all: $(LIB)
 
@@ -65,6 +68,14 @@ $(DOC): $(SRC)
 		-o $(BUILD)/doc $(SRC)
 
 doc: $(DOC)
+
+$(BUILD)/ex-%: examples/%.rs $(LIB)
+	mkdir -p $(BUILD)
+	HTTP_VERSION=$(VERSION) $(RUSTC) --edition 2024 \
+		--crate-name $* --extern http=$(LIB) -L $(BUILD) \
+		$(RUSTFLAGS) -o $@ $<
+
+examples: $(EXAMPLES)
 
 clean:
 	rm -rf $(BUILD)
