@@ -14,7 +14,12 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-# Native libs required by consumers that vendor http.rs.  Read by
+# Build-time metadata for consumers that vendor http.rs.  Read by
 # marmita(1) on `add`/`update` and copied to vendor/<stem>.mk so the
 # consumer's Makefile can pick it up via -include $(wildcard vendor/*.mk).
+#
+# LINK_FLAGS: native libs added to the bin link step.
+# BUILD_ENV:  env vars exported when compiling vendor/http.rs as rlib
+#             (http.rs reads HTTP_VERSION via env! at compile time).
 LINK_FLAGS += -ltls -lcrypto
+BUILD_ENV  += HTTP_VERSION=$(VERSION)
