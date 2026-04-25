@@ -1329,6 +1329,16 @@ impl RequestBuilder {
         self
     }
 
+    /// Set the body to a `multipart/form-data` payload (RFC 2388) and
+    /// the Content-Type header (with boundary).  Overwrites any previous
+    /// body and Content-Type.
+    pub fn multipart(mut self, form: Multipart) -> Self {
+        let ct = form.content_type();
+        self.body = form.into_bytes();
+        self.headers.set("Content-Type", ct);
+        self
+    }
+
     /// Override the read/write timeout.  Default is 30 seconds.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -1500,6 +1510,165 @@ pub fn url_form(pairs: &[(&str, &str)]) -> String {
         out.push_str(&percent_encode(v));
     }
     out
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// multipart/form-data (RFC 2388)
+//////////////////////////////////////////////////////////////////////////////
+
+/// A `multipart/form-data` body builder.  RFC 2388.
+///
+/// Each part has a name and either a text value or a file payload
+/// (filename + content-type + bytes).  Pass the finished form to
+/// [`RequestBuilder::multipart`], which sets the Content-Type header
+/// (with the boundary) and serializes the body.
+#[derive(Clone, Debug)]
+pub struct Multipart {
+    boundary: String,
+    parts: Vec<Part>,
+}
+
+#[derive(Clone, Debug)]
+struct Part {
+    name: String,
+    filename: Option<String>,
+    content_type: Option<String>,
+    body: Vec<u8>,
+}
+
+impl Multipart {
+    /// Create a new form with a fresh boundary.
+    pub fn new() -> Self {
+        Self {
+            boundary: gen_boundary(),
+            parts: Vec::new(),
+        }
+    }
+
+    /// Append a text field.
+    pub fn text(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.parts.push(Part {
+            name: name.into(),
+            filename: None,
+            content_type: None,
+            body: value.into().into_bytes(),
+        });
+        self
+    }
+
+    /// Append a file field with explicit filename, content type, and bytes.
+    pub fn file(
+        mut self,
+        name: impl Into<String>,
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.parts.push(Part {
+            name: name.into(),
+            filename: Some(filename.into()),
+            content_type: Some(content_type.into()),
+            body: body.into(),
+        });
+        self
+    }
+
+    /// Append a file field by reading `path` from disk.  The filename
+    /// sent is the path's final component.
+    pub fn file_path(
+        self,
+        name: impl Into<String>,
+        path: impl AsRef<std::path::Path>,
+        content_type: impl Into<String>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let body = std::fs::read(path)
+            .map_err(|e| Error::new(format!("read {}: {e}", path.display())))?;
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::new("path has no file name"))?
+            .to_owned();
+        Ok(self.file(name, filename, content_type, body))
+    }
+
+    /// The boundary string (without the leading dashes).
+    pub fn boundary(&self) -> &str {
+        &self.boundary
+    }
+
+    /// Value to use in the `Content-Type` header.
+    pub fn content_type(&self) -> String {
+        format!("multipart/form-data; boundary={}", self.boundary)
+    }
+
+    /// Serialize the form body to bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_to(&mut out).expect("Vec write is infallible");
+        out
+    }
+
+    /// Write the serialized form body to `w`.
+    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+        for part in &self.parts {
+            write!(w, "--{}\r\n", self.boundary)?;
+            w.write_all(b"Content-Disposition: form-data; name=\"")?;
+            write_quoted(w, &part.name)?;
+            w.write_all(b"\"")?;
+            if let Some(filename) = &part.filename {
+                w.write_all(b"; filename=\"")?;
+                write_quoted(w, filename)?;
+                w.write_all(b"\"")?;
+            }
+            w.write_all(b"\r\n")?;
+            if let Some(ct) = &part.content_type {
+                write!(w, "Content-Type: {ct}\r\n")?;
+            }
+            w.write_all(b"\r\n")?;
+            w.write_all(&part.body)?;
+            w.write_all(b"\r\n")?;
+        }
+        write!(w, "--{}--\r\n", self.boundary)
+    }
+}
+
+impl Default for Multipart {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Backslash-escape `"` and `\` per RFC 2616 §2.2 quoted-string.  CR/LF
+/// are not legal inside a quoted-string, so they are dropped.
+fn write_quoted(w: &mut impl Write, s: &str) -> io::Result<()> {
+    for &b in s.as_bytes() {
+        match b {
+            b'"' | b'\\' => w.write_all(&[b'\\', b])?,
+            b'\r' | b'\n' => continue,
+            _ => w.write_all(&[b])?,
+        }
+    }
+    Ok(())
+}
+
+/// A boundary that is unique within a process: nanos + pid + counter,
+/// as 70-bchar-safe hex.  RFC 2046 §5.1.1 only requires uniqueness
+/// against the body, not unpredictability.
+fn gen_boundary() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    format!("----http-rs-{nanos:016x}-{pid:08x}-{n:08x}")
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1807,5 +1976,68 @@ mod tests {
         assert!(is_final_chunked("  chunked  "));
         assert!(!is_final_chunked("chunked, gzip"));
         assert!(!is_final_chunked("gzip"));
+    }
+
+    #[test]
+    fn multipart_format() {
+        let form = Multipart::new().text("name", "Murilo").file(
+            "upload",
+            "hello.txt",
+            "text/plain",
+            b"hello".to_vec(),
+        );
+        let boundary = form.boundary().to_owned();
+        let s = String::from_utf8(form.into_bytes()).unwrap();
+        let expected = format!(
+            "--{b}\r\n\
+             Content-Disposition: form-data; name=\"name\"\r\n\
+             \r\n\
+             Murilo\r\n\
+             --{b}\r\n\
+             Content-Disposition: form-data; name=\"upload\"; \
+             filename=\"hello.txt\"\r\n\
+             Content-Type: text/plain\r\n\
+             \r\n\
+             hello\r\n\
+             --{b}--\r\n",
+            b = boundary,
+        );
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn multipart_content_type_header() {
+        let form = Multipart::new();
+        let ct = form.content_type();
+        let prefix = "multipart/form-data; boundary=";
+        assert!(ct.starts_with(prefix));
+        assert_eq!(&ct[prefix.len()..], form.boundary());
+    }
+
+    #[test]
+    fn multipart_quotes_special_chars() {
+        let form = Multipart::new().file(
+            "f",
+            "a\"b\\c.txt",
+            "application/octet-stream",
+            b"x".to_vec(),
+        );
+        let s = String::from_utf8(form.into_bytes()).unwrap();
+        assert!(s.contains("filename=\"a\\\"b\\\\c.txt\""));
+    }
+
+    #[test]
+    fn multipart_unique_boundaries() {
+        let a = Multipart::new();
+        let b = Multipart::new();
+        assert_ne!(a.boundary(), b.boundary());
+    }
+
+    #[test]
+    fn multipart_empty_form() {
+        let form = Multipart::new();
+        let boundary = form.boundary().to_owned();
+        let s = String::from_utf8(form.into_bytes()).unwrap();
+        assert_eq!(s, format!("--{boundary}--\r\n"));
     }
 }
